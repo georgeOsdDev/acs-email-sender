@@ -2,17 +2,41 @@
 
 Azure Communication Services (ACS) のメール送信機能を使用して、`EmailSendResult` のステータスパターンを検証するためのJavaコンソールアプリケーションです。
 
-## EmailSendResult のステータスパターン
+## ステータスの種類
 
-`EmailSendResult` は以下のステータスを返します：
+ACS Email SDK では、2種類のステータスが存在します。これらは別々の enum であり、混同しないように注意が必要です。
+
+### 1. LongRunningOperationStatus（Azure SDK 共通）
+
+`PollResponse.getStatus()` で取得できる、Azure SDK の長時間実行操作（LRO）の汎用ステータスです。
 
 | ステータス | 説明 |
 |-----------|------|
-| `NOT_STARTED` | 操作がまだ開始されていません。※現時点ではサービスから返されないステータスです |
-| `RUNNING` (IN_PROGRESS) | メール送信操作が進行中で処理されています |
-| `SUCCEEDED` (SUCCESSFULLY_COMPLETED) | メール送信が成功し、エラーなく完了しました。メールは配信のために送信されています。この段階以降の詳細な配信ステータスは Azure Monitor または Azure Event Grid で確認できます |
-| `FAILED` | メール送信操作が失敗しました。メールは送信されていません。結果には失敗理由の詳細を含むエラーオブジェクトが含まれます |
-| `CANCELED` | 操作がキャンセルされました |
+| `NOT_STARTED` | 操作がまだ開始されていない |
+| `IN_PROGRESS` | 操作が進行中（ポーリング継続） |
+| `SUCCESSFULLY_COMPLETED` | 操作が正常に完了（終端状態） |
+| `FAILED` | 操作が失敗（終端状態） |
+| `USER_CANCELLED` | ユーザーによりキャンセル（終端状態） |
+
+### 2. EmailSendStatus（ACS Email 固有）
+
+`EmailSendResult.getStatus()` で取得できる、ACS Email サービス固有のステータスです。
+
+| ステータス | 説明 |
+|-----------|------|
+| `NotStarted` | 操作がまだ開始されていない（※現時点ではサービスから返されない） |
+| `Running` | メール送信操作が進行中 |
+| `Succeeded` | メール送信が成功（ACSがメールを送信キューに投入完了） |
+| `Failed` | メール送信操作が失敗（`error` オブジェクトに詳細あり） |
+| `Canceled` | 操作がキャンセルされた |
+
+### ステータスの対応関係
+
+| LongRunningOperationStatus | EmailSendStatus | 説明 |
+|---------------------------|-----------------|------|
+| `IN_PROGRESS` | `Running` | 処理中 |
+| `SUCCESSFULLY_COMPLETED` | `Succeeded` | 成功 |
+| `FAILED` | `Failed` | 失敗 |
 
 ## EmailSendResult の構造
 
@@ -21,13 +45,43 @@ public class EmailSendResult {
     // 操作の一意のID (UUID)
     private final String id;
 
-    // 操作のステータス
+    // 操作のステータス (EmailSendStatus)
     private final EmailSendStatus status;
 
-    // 非成功の終端状態時のエラー詳細（該当する場合）
-    private ErrorDetail error;
+    // 失敗時のエラー詳細（該当する場合）
+    private ResponseError error;
 }
 ```
+
+## 重要: Succeeded の意味
+
+**`EmailSendStatus.Succeeded` は「メールが受信者に届いた」ことを意味しません。**
+
+| ステータス | 意味 |
+|-----------|------|
+| `Succeeded` | ACS がメールを**送信キューに正常に投入した** |
+| ≠ | 受信者のメールサーバーに到達した |
+| ≠ | 受信者がメールを受信した |
+
+### EmailSendResult で検知できる/できないエラー
+
+| エラー種別 | 検知可能 | 例 |
+|-----------|:---:|-----|
+| 送信元アドレスが無効 | ✅ | 検証されていないドメイン |
+| 接続文字列が無効 | ✅ | 認証エラー |
+| メッセージフォーマット不正 | ✅ | 必須フィールド欠落 |
+| サプレッションリスト登録済み | ✅ | `EmailDroppedAllRecipientsSuppressed` |
+| **存在しないメールアドレス** | ❌ | `user@valid-domain.com` |
+| **存在しないドメイン** | ❌ | `@microsoft.comm`（Succeeded になる） |
+| **受信者メールボックス満杯** | ❌ | バウンスメール |
+| **スパムフィルタでブロック** | ❌ | 受信者側の拒否 |
+
+### 配信結果を確認する方法
+
+実際の配信結果を確認するには：
+
+1. **Azure Event Grid** で `EmailDeliveryReportReceived` イベントを購読
+2. **Azure Monitor** でログを確認
 
 ## 前提条件
 
